@@ -93,8 +93,6 @@ fn main() {
                     DIRECTION.store(Direction::STOP as usize, Ordering::Relaxed);
                 }
             }
-
-            refresh();
         }
     });
 
