@@ -1,303 +1,25 @@
 extern crate ncurses;
 
-use core::{fmt, ptr};
-use std::convert::{TryFrom, TryInto};
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write, Read};
+use core::{fmt};
+use std::convert::{TryInto};
 use std::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
 use std::{thread, io};
 use std::thread::Builder;
 use std::time::Duration;
 use ncurses::*;
 
-use rand::Rng;
 use crate::score_manager::ScoreManager;
 use std::ops::Add;
-use futures::future::Future;
-use completable_future::CompletableFuture;
-use std::cell::{RefCell, UnsafeCell};
+use crate::direction::Direction;
+use crate::snake::Snake;
+use crate::fruit::Fruit;
+use crate::difficulty::Difficulty;
 
+mod difficulty;
+mod direction;
+mod fruit;
 mod score_manager;
-
-#[derive(Debug)]
-enum Direction {
-    UP,
-    DOWN,
-    LEFT,
-    RIGHT,
-    STOP,
-}
-
-impl fmt::Display for Direction {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-// implement from usize for Direction to be able to use an AtomicUsize and load the Direction from it
-// since an AtomicPtr couldn't be dereferenced to a Direction
-impl From<usize> for Direction {
-    fn from(val: usize) -> Self {
-        match val {
-            0 => Direction::UP,
-            1 => Direction::DOWN,
-            2 => Direction::LEFT,
-            3 => Direction::RIGHT,
-            4 => Direction::STOP,
-            _ => unreachable!()
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum Difficulty {
-    EASY,
-    ARCADE,
-    NORMAL,
-    HARD,
-}
-
-impl fmt::Display for Difficulty {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl TryFrom<u32> for Difficulty {
-    type Error = ();
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Difficulty::EASY),
-            1 => Ok(Difficulty::ARCADE),
-            2 => Ok(Difficulty::NORMAL),
-            3 => Ok(Difficulty::HARD),
-            _ => Err(())
-        }
-    }
-}
-
-impl Difficulty {
-    fn is_game_over_on_wall_collision(&self) -> bool {
-        match self {
-            Difficulty::EASY => false,
-            Difficulty::ARCADE => false,
-            Difficulty::NORMAL => true,
-            Difficulty::HARD => true
-        }
-    }
-
-    fn get_refresh_delay(&self) -> u64 {
-        match self {
-            Difficulty::EASY => 150,
-            Difficulty::ARCADE => 50,
-            Difficulty::NORMAL => 150,
-            Difficulty::HARD => 50
-        }
-    }
-
-    fn get_description(&self) -> &str {
-        match self {
-            Difficulty::EASY => "No game over on wall collision and slow speed",
-            Difficulty::ARCADE => "Easy but speedy",
-            Difficulty::NORMAL => "Game over on wall collision, normal speed",
-            Difficulty::HARD => "Dangerous walls and fast speed"
-        }
-    }
-
-    fn get_score_multiplier(&self) -> u16 {
-        match self {
-            Difficulty::EASY => 1,
-            Difficulty::ARCADE => 2,
-            Difficulty::NORMAL => 3,
-            Difficulty::HARD => 5
-        }
-    }
-}
-
-struct Fruit {
-    x_pos: u16,
-    y_pos: u16,
-}
-
-struct Snake {
-    x_pos: u16,
-    y_pos: u16,
-    tail_x_pos: Vec<u16>,
-    tail_y_pos: Vec<u16>,
-}
-
-impl Snake {
-    fn new() -> Snake {
-        Snake {
-            // spawn head in the middle of the field
-            x_pos: FIELD_WIDTH / 2,
-            y_pos: FIELD_HEIGHT / 2,
-            tail_x_pos: Vec::new(),
-            tail_y_pos: Vec::new(),
-        }
-    }
-
-    fn move_pos(&mut self, direction: Direction) {
-        match direction {
-            Direction::UP => {
-                self.move_tail();
-                self.y_pos -= 1;
-            }
-            Direction::DOWN => {
-                self.move_tail();
-                self.y_pos += 1;
-            }
-            Direction::LEFT => {
-                self.move_tail();
-                self.x_pos -= 1;
-            }
-            Direction::RIGHT => {
-                self.move_tail();
-                self.x_pos += 1
-            }
-            Direction::STOP => {}
-        };
-    }
-
-    fn move_tail(&mut self) {
-        if self.tail_x_pos.len() == 0 {
-            return;
-        }
-
-        // iterate backwards to update last element first since each element depends on the old value
-        // of the element in front of it
-        for i in (0..self.tail_x_pos.len()).rev() {
-            if i == 0 {
-                self.tail_x_pos[0] = self.x_pos;
-                self.tail_y_pos[0] = self.y_pos;
-            } else {
-                self.tail_x_pos[i] = self.tail_x_pos[i - 1];
-                self.tail_y_pos[i] = self.tail_y_pos[i - 1];
-            }
-        }
-    }
-
-    // spawn new element outside of view
-    fn append_tail(&mut self) {
-        self.tail_x_pos.push(FIELD_HEIGHT + 1);
-        self.tail_y_pos.push(FIELD_WIDTH + 1);
-    }
-
-    fn create_tail_matrix(&self) -> Vec<Vec<bool>> {
-        let mut matrix: Vec<Vec<bool>> = Vec::with_capacity(FIELD_HEIGHT as usize);
-
-        for _y in 0..FIELD_HEIGHT {
-            let mut row: Vec<bool> = Vec::with_capacity(FIELD_WIDTH as usize);
-
-            for _x in 0..FIELD_WIDTH {
-                row.push(false);
-            }
-
-            matrix.push(row);
-        }
-
-        for i in 0..self.tail_x_pos.len() {
-            let curr_x = self.tail_x_pos[i];
-            let curr_y = self.tail_y_pos[i];
-
-            // mind that newly created tail elements are spawned out of view
-            if curr_x < FIELD_WIDTH && curr_y < FIELD_HEIGHT {
-                matrix[curr_y as usize][curr_x as usize] = true;
-            }
-        }
-
-        return matrix;
-    }
-
-    fn reset(&mut self) {
-        self.x_pos = FIELD_WIDTH / 2;
-        self.y_pos = FIELD_HEIGHT / 2;
-        self.tail_x_pos.clear();
-        self.tail_y_pos.clear();
-    }
-}
-
-impl Fruit {
-    fn new() -> Fruit {
-        let rand_location = Self::generate_rand_location();
-
-        Fruit {
-            x_pos: rand_location.0,
-            y_pos: rand_location.1,
-        }
-    }
-
-    fn generate_rand_location() -> (u16, u16) {
-        let mut rng = rand::thread_rng();
-
-        let pos_x = rng.gen_range(1, FIELD_WIDTH - 1);
-        let pos_y = rng.gen_range(1, FIELD_HEIGHT - 1);
-
-        (pos_x, pos_y)
-    }
-
-    fn respawn(&mut self) {
-        let rand_location = Self::generate_rand_location();
-        self.x_pos = rand_location.0;
-        self.y_pos = rand_location.1;
-    }
-}
-
-struct FutureHolder {
-    future: UnsafeCell<Option<CompletableFuture<i32, ()>>>
-}
-
-impl FutureHolder {
-    const fn new() -> FutureHolder {
-        FutureHolder { future: UnsafeCell::new(None) }
-    }
-
-    fn prepare(&self) {
-        unsafe {
-            self.future.get().replace(Some(CompletableFuture::<i32, ()>::new()));
-        }
-    }
-
-    /// Replaces the current Option with None and transfers ownership of the previous value to the caller
-    fn consume(&self) -> Option<CompletableFuture<i32, ()>> {
-        unsafe {
-            self.future.get().replace(None)
-        }
-    }
-
-    /// wait for the value to be completed in another thread, blocking the current thread, this consumes
-    /// the current future
-    fn wait(&self) -> Option<i32> {
-        let consumed_val = self.consume();
-        match consumed_val {
-            Some(fut) => {
-                let val = fut.wait().unwrap();
-                return Some(val);
-            }
-            None => {
-                return None;
-            }
-        };
-    }
-
-    fn is_empty(&self) -> bool {
-        unsafe {
-            self.future.get().read().is_none()
-        }
-    }
-
-    fn complete_optional(&self, val: i32) {
-        unsafe {
-            match self.future.get().read() {
-                Some(fut) => {
-                    fut.signal().complete(val);
-                }
-                None => {}
-            };
-        }
-    }
-}
+mod snake;
 
 struct Cleanup;
 
@@ -344,7 +66,6 @@ fn main() {
     let mut fruit = Fruit::new();
 
     let mut game_over = false;
-    let mut game_quit = false;
     let mut current_score: u64 = 0;
     let high_scores = score_manager.get_high_scores(&difficulty, 1);
     let mut high_score_display = create_high_score_display(&high_scores);

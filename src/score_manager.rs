@@ -1,6 +1,5 @@
-use std::cmp::Ordering;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Cursor, Write};
+use std::io::{BufReader, Read, Cursor, Write};
 use std::path::Path;
 
 use quick_xml::events::{Event, BytesStart, BytesEnd};
@@ -147,11 +146,11 @@ impl<'a> ScoreManager<'a> {
 
         let mut file = File::create("scores.xml").expect("could not open score file");
         let bytes = writer.into_inner().into_inner();
-        file.write_all(bytes.as_slice());
+        file.write_all(bytes.as_slice()).expect("failed writing score to file");
     }
 
     fn create_reader(&self) -> Reader<BufReader<File>> {
-        let mut score_file = OpenOptions::new().read(true).write(true).create(true).open(self.file_path).expect("Failed to open score file");
+        let score_file = OpenOptions::new().read(true).write(true).create(true).open(self.file_path).expect("Failed to open score file");
         let mut file_reader = BufReader::new(&score_file);
         let mut xml_content: String = String::from("");
         file_reader.read_to_string(&mut xml_content).expect("Unable to read xml file");
