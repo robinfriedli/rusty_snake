@@ -1,22 +1,27 @@
 extern crate ncurses;
 
-use core::{fmt};
-use std::convert::{TryInto};
-use std::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
-use std::{thread, io};
+use core::fmt;
+use std::{io, thread};
+use std::convert::TryInto;
+use std::ops::Add;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::Builder;
 use std::time::Duration;
-use ncurses::*;
 
-use crate::score_manager::ScoreManager;
-use std::ops::Add;
-use crate::direction::Direction;
-use crate::snake::Snake;
-use crate::fruit::Fruit;
+use ncurses::*;
+use stopwatch::Stopwatch;
+
 use crate::difficulty::Difficulty;
+use crate::direction::Direction;
+use crate::direction::Direction::STOP;
+use crate::duration_formatter::DurationFormatter;
+use crate::fruit::Fruit;
+use crate::score_manager::ScoreManager;
+use crate::snake::Snake;
 
 mod difficulty;
 mod direction;
+mod duration_formatter;
 mod fruit;
 mod score_manager;
 mod snake;
@@ -53,10 +58,10 @@ static GAME_RETRY: AtomicBool = AtomicBool::new(false);
 fn main() {
     // make sure endwin() is called even on panic
     let _cleanup = Cleanup;
-    let mut score_manager = ScoreManager::from_file("scores.xml");
+    let score_manager = ScoreManager::from_file("scores.xml");
 
     print!("\x1B[2J");
-    print_start_screen();
+    print_start_screen(score_manager.get_total_playtime_display());
     let mut user_name_temp = String::new();
     io::stdin().read_line(&mut user_name_temp).expect("could not read user name");
     let user_name = user_name_temp.trim();
@@ -69,6 +74,7 @@ fn main() {
     let mut current_score: u64 = 0;
     let high_scores = score_manager.get_high_scores(&difficulty, 1);
     let mut high_score_display = create_high_score_display(&high_scores);
+    let mut stopwatch = stopwatch::Stopwatch::new();
 
     let _x = Builder::new().name(String::from("input-handler")).spawn(|| {
         loop {
@@ -99,11 +105,17 @@ fn main() {
     while !GAME_TERMINATED.load(Ordering::Relaxed) {
         while !game_over {
             clear();
-            draw(&snake, &fruit, current_score, &high_score_display, &difficulty);
+            draw(&snake, &fruit, current_score, &high_score_display, &difficulty, &stopwatch);
 
             refresh();
 
-            snake.move_pos(DIRECTION.load(Ordering::Relaxed).into());
+            let current_direction = DIRECTION.load(Ordering::Relaxed).into();
+            snake.move_pos(&current_direction);
+            if current_direction == STOP && stopwatch.is_running() {
+                stopwatch.stop();
+            } else if current_direction != STOP && !stopwatch.is_running() {
+                stopwatch.start();
+            }
 
             // do not use an else if here since moving the snake when is_game_over_on_wall_collision is
             // false might result in the snake being placed an a fruit, so this should always get checked
@@ -139,9 +151,9 @@ fn main() {
             thread::sleep(Duration::from_millis(difficulty.get_refresh_delay()));
         }
 
-        score_manager.write_score(current_score, &difficulty, user_name);
+        score_manager.write_score(current_score, &difficulty, user_name, stopwatch.elapsed().as_millis());
         let new_high_scores = score_manager.get_high_scores(&difficulty, 3);
-        print_game_over_screen(current_score, &new_high_scores, &difficulty);
+        print_game_over_screen(current_score, &new_high_scores, &difficulty, &stopwatch);
         LISTENING_FOR_GAME_TERMINATION.store(true, Ordering::Relaxed);
         loop {
             if GAME_RETRY.load(Ordering::Relaxed) {
@@ -151,6 +163,7 @@ fn main() {
                 snake.reset();
                 DIRECTION.store(Direction::STOP as usize, Ordering::Relaxed);
                 game_over = false;
+                stopwatch.reset();
                 LISTENING_FOR_GAME_TERMINATION.store(false, Ordering::Relaxed);
                 GAME_RETRY.store(false, Ordering::Relaxed);
                 break;
@@ -163,7 +176,7 @@ fn main() {
     }
 }
 
-fn draw(snake: &Snake, fruit: &Fruit, score: u64, high_score_display: &String, difficulty: &Difficulty) {
+fn draw(snake: &Snake, fruit: &Fruit, score: u64, high_score_display: &String, difficulty: &Difficulty, stopwatch: &Stopwatch) {
     let max_y_index = FIELD_HEIGHT - 1;
     let max_x_index = FIELD_WIDTH - 1;
     let tail_matrix = snake.create_tail_matrix();
@@ -198,6 +211,8 @@ fn draw(snake: &Snake, fruit: &Fruit, score: u64, high_score_display: &String, d
     addstr(format!("Direction:                              {}", direction).as_str());
     addch('\n' as u32);
     addstr(format!("Difficulty:                             {}", difficulty).as_str());
+    addch('\n' as u32);
+    addstr(format!("Duration:                               {}", stopwatch.elapsed().format_duration()).as_str());
 }
 
 fn select_difficulty() -> Difficulty {
@@ -265,17 +280,18 @@ fn print_difficulty_selection() {
     refresh();
 }
 
-fn create_high_score_display(high_score_vec: &Vec<(u64, String)>) -> String {
+fn create_high_score_display(high_score_vec: &Vec<(u64, String, Option<u64>)>) -> String {
     if high_score_vec.is_empty() {
         String::from("0")
     } else {
         let high_score_tuple = &high_score_vec[0];
-        String::from(high_score_tuple.0.to_string()).add(" (").add(high_score_tuple.1.as_str()).add(")")
+        let time_string = high_score_tuple.2.format_duration();
+        String::from(high_score_tuple.0.to_string()).add(" (").add(high_score_tuple.1.as_str()).add(")").add(time_string.as_str())
     }
 }
 
-fn print_start_screen() {
-    let start_text = r#"
+fn print_start_screen(playtime_display: String) {
+    println!(r#"
  ______   ___   __    ________   ___   ___   ______
 /_____/\ /__/\ /__/\ /_______/\ /___/\/__/\ /_____/\
 \::::_\/_\::\_\\  \ \\::: _  \ \\::.\ \\ \ \\::::_\/_
@@ -283,6 +299,8 @@ fn print_start_screen() {
   \_::._\:\\:. _    \ \\:: __  \ \\:. __  ( ( \::___\/_
     /____\:\\. \`-\  \ \\:.\ \  \ \\: \ )  \ \ \:\____/\
     \_____\/ \__\/ \__\/ \__\/\__\/ \__\/\__\/  \_____\/
+
+Total playtime: {}
 
 Controls:
 W:  UP
@@ -293,11 +311,10 @@ P:  PAUSE (click any other direction to unpause)
 ___________________
 Enter player name:
 -------------------
-    "#;
-    println!("{}", start_text);
+    "#, playtime_display);
 }
 
-fn print_game_over_screen(current_score: u64, high_scores: &Vec<(u64, String)>, difficulty: &Difficulty) {
+fn print_game_over_screen(current_score: u64, high_scores: &Vec<(u64, String, Option<u64>)>, difficulty: &Difficulty, stopwatch: &Stopwatch) {
     clear();
     refresh();
     let game_over_text = r#"
@@ -311,12 +328,14 @@ fn print_game_over_screen(current_score: u64, high_scores: &Vec<(u64, String)>, 
 
     "#;
 
-    let mut output = String::from(game_over_text).add("Your score:\n")
+    let mut output = String::from(game_over_text).add("\nYour score:\n")
         .add(current_score.to_string().as_str()).add("\n\n")
+        .add("Your time:\n")
+        .add(stopwatch.elapsed().format_duration().as_str()).add("\n\n\n")
         .add("High scores (").add(difficulty.to_string().as_str()).add(")\n");
 
     for score_tuple in high_scores {
-        let line = String::from(score_tuple.1.as_str()).add(":\t").add(score_tuple.0.to_string().as_str()).add("\n");
+        let line = String::from(score_tuple.1.as_str()).add(":\t\t\t").add(score_tuple.0.to_string().as_str()).add(score_tuple.2.format_duration().as_str()).add("\n");
         output.push_str(line.as_str());
     }
 

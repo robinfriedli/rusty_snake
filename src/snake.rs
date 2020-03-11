@@ -1,5 +1,5 @@
+use crate::{FIELD_HEIGHT, FIELD_WIDTH};
 use crate::direction::Direction;
-use crate::{FIELD_WIDTH, FIELD_HEIGHT};
 
 pub struct Snake {
     pub(crate) x_pos: u16,
@@ -19,7 +19,7 @@ impl Snake {
         }
     }
 
-    pub fn move_pos(&mut self, direction: Direction) {
+    pub fn move_pos(&mut self, direction: &Direction) {
         match direction {
             Direction::UP => {
                 self.move_tail();

@@ -1,6 +1,6 @@
 use crate::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, std::cmp::PartialEq)]
 pub enum Direction {
     UP,
     DOWN,
