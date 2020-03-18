@@ -8,8 +8,11 @@ ______   ___   __    ________   ___   ___   ______
     \_____\/ \__\/ \__\/ \__\/\__\/ \__\/\__\/  \_____\/
 ```
 # rusty_snake
-A CLI snake game written in Rust for Mac and Linux featuring several difficulty settings and persistent high scores.
-Compiling requires ncurses to be installed. This should always be the case on MacOS, on Linux you might need to install `libncurses5-dev`.
+A CLI snake game written in Rust for Mac, Linux and Windows featuring several difficulty settings and persistent high scores.
+Compiling on Mac / Linux requires ncurses to be installed. This should always be the case on MacOS (else you can try
+installing ncurses via homebrew), on Linux you might need to install `libncurses5-dev`. On Windows a C compiler with an
+ABI compatible with your Rust toolchain is required in order to compile PDCurses (gcc for GNU or cl for MSVC). Mind that initscr() opens a new window
+on Windows, which occurs after entering the player name.
 
 ```
  ______   ___   __    ________   ___   ___   ______

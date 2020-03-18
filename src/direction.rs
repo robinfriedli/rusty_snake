@@ -14,18 +14,3 @@ impl fmt::Display for Direction {
         write!(f, "{:?}", self)
     }
 }
-
-// implement from usize for Direction to be able to use an AtomicUsize and load the Direction from it
-// since an AtomicPtr couldn't be dereferenced to a Direction
-impl From<usize> for Direction {
-    fn from(val: usize) -> Self {
-        match val {
-            0 => Direction::UP,
-            1 => Direction::DOWN,
-            2 => Direction::LEFT,
-            3 => Direction::RIGHT,
-            4 => Direction::STOP,
-            _ => unreachable!()
-        }
-    }
-}

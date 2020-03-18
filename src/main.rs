@@ -1,14 +1,10 @@
-extern crate ncurses;
-
 use core::fmt;
 use std::{io, thread};
 use std::convert::TryInto;
 use std::ops::Add;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread::Builder;
 use std::time::Duration;
 
-use ncurses::*;
+use pancurses::*;
 use stopwatch::Stopwatch;
 
 use crate::difficulty::Difficulty;
@@ -26,14 +22,6 @@ mod fruit;
 mod score_manager;
 mod snake;
 
-struct Cleanup;
-
-impl Drop for Cleanup {
-    fn drop(&mut self) {
-        endwin();
-    }
-}
-
 const WALL_SYMBOL: char = '#';
 const FRUIT_SYMBOL: char = 'F';
 const HEAD_SYMBOL: char = 'O';
@@ -42,18 +30,39 @@ const TAIL_SYMBOL: char = 'o';
 const FIELD_WIDTH: u16 = 50;
 const FIELD_HEIGHT: u16 = 50;
 
-const UP_KEY: i32 = 'w' as i32;
-const DOWN_KEY: i32 = 's' as i32;
-const LEFT_KEY: i32 = 'a' as i32;
-const RIGHT_KEY: i32 = 'd' as i32;
-const PAUSE_KEY: i32 = 'p' as i32;
-const RETRY_KEY: i32 = 'r' as i32;
-const QUIT_KEY: i32 = 'q' as i32;
+const UP_KEY: char = 'w';
+const DOWN_KEY: char = 's';
+const LEFT_KEY: char = 'a';
+const RIGHT_KEY: char = 'd';
+const PAUSE_KEY: char = 'p';
+const RETRY_KEY: char = 'r';
+const QUIT_KEY: char = 'q';
 
-static DIRECTION: AtomicUsize = AtomicUsize::new(Direction::STOP as usize);
-static LISTENING_FOR_GAME_TERMINATION: AtomicBool = AtomicBool::new(false);
-static GAME_TERMINATED: AtomicBool = AtomicBool::new(false);
-static GAME_RETRY: AtomicBool = AtomicBool::new(false);
+struct GameState {
+    game_over: bool,
+    game_terminated: bool,
+    current_direction: Direction,
+    current_score: u64,
+}
+
+impl GameState {
+    fn new() -> Self {
+        GameState {
+            game_over: false,
+            game_terminated: false,
+            current_direction: Direction::STOP,
+            current_score: 0,
+        }
+    }
+}
+
+struct Cleanup;
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        endwin();
+    }
+}
 
 fn main() {
     // make sure endwin() is called even on panic
@@ -65,118 +74,119 @@ fn main() {
     let mut user_name_temp = String::new();
     io::stdin().read_line(&mut user_name_temp).expect("could not read user name");
     let user_name = user_name_temp.trim();
-    initscr();
-    let difficulty = select_difficulty();
+
+    let window = initscr();
+    noecho();
+    let rows = FIELD_HEIGHT as i32 + 20;
+    let cols = FIELD_WIDTH as i32 + 20;
+    if window.get_max_x() < cols || window.get_max_y() < rows {
+        resize_term(rows, cols);
+    }
+
+    let difficulty = select_difficulty(&window);
+    window.nodelay(true);
     let mut snake = Snake::new();
     let mut fruit = Fruit::new();
 
-    let mut game_over = false;
-    let mut current_score: u64 = 0;
+    let mut game_state = GameState::new();
     let high_scores = score_manager.get_high_scores(&difficulty, 1);
     let mut high_score_display = create_high_score_display(&high_scores);
     let mut stopwatch = stopwatch::Stopwatch::new();
 
-    let _x = Builder::new().name(String::from("input-handler")).spawn(|| {
-        loop {
-            let input = getch();
-
-            if LISTENING_FOR_GAME_TERMINATION.load(Ordering::Relaxed) {
-                if input == RETRY_KEY {
-                    GAME_RETRY.store(true, Ordering::Relaxed);
-                } else if input == QUIT_KEY {
-                    GAME_TERMINATED.store(true, Ordering::Relaxed);
-                }
-            } else {
-                if input == UP_KEY {
-                    DIRECTION.store(Direction::UP as usize, Ordering::Relaxed);
-                } else if input == DOWN_KEY {
-                    DIRECTION.store(Direction::DOWN as usize, Ordering::Relaxed);
-                } else if input == LEFT_KEY {
-                    DIRECTION.store(Direction::LEFT as usize, Ordering::Relaxed);
-                } else if input == RIGHT_KEY {
-                    DIRECTION.store(Direction::RIGHT as usize, Ordering::Relaxed);
-                } else if input == PAUSE_KEY {
-                    DIRECTION.store(Direction::STOP as usize, Ordering::Relaxed);
-                }
-            }
-        }
-    });
-
-    while !GAME_TERMINATED.load(Ordering::Relaxed) {
-        while !game_over {
-            clear();
-            draw(&snake, &fruit, current_score, &high_score_display, &difficulty, &stopwatch);
-
-            refresh();
-
-            let current_direction = DIRECTION.load(Ordering::Relaxed).into();
-            snake.move_pos(&current_direction);
-            if current_direction == STOP && stopwatch.is_running() {
-                stopwatch.stop();
-            } else if current_direction != STOP && !stopwatch.is_running() {
-                stopwatch.start();
-            }
-
-            // do not use an else if here since moving the snake when is_game_over_on_wall_collision is
-            // false might result in the snake being placed an a fruit, so this should always get checked
-            if snake.x_pos == 0 || snake.x_pos == FIELD_WIDTH - 1 || snake.y_pos == 0 || snake.y_pos == FIELD_HEIGHT - 1 {
-                if difficulty.is_game_over_on_wall_collision() {
-                    game_over = true;
-                } else {
-                    if snake.x_pos == 0 {
-                        snake.x_pos = FIELD_WIDTH - 2;
-                    } else if snake.x_pos == FIELD_WIDTH - 1 {
-                        snake.x_pos = 1;
-                    }
-                    if snake.y_pos == 0 {
-                        snake.y_pos = FIELD_HEIGHT - 2;
-                    } else if snake.y_pos == FIELD_HEIGHT - 1 {
-                        snake.y_pos = 1;
-                    }
-                }
-            }
-
-            for i in 0..snake.tail_x_pos.len() {
-                if snake.tail_x_pos[i] == snake.x_pos && snake.tail_y_pos[i] == snake.y_pos {
-                    game_over = true;
-                }
-            }
-
-            if snake.x_pos == fruit.x_pos && snake.y_pos == fruit.y_pos {
-                current_score += 5 * difficulty.get_score_multiplier() as u64;
-                snake.append_tail();
-                fruit.respawn();
-            }
+    while !game_state.game_terminated {
+        while !game_state.game_over {
+            window.clear();
+            draw(&window, &snake, &fruit, &game_state, &high_score_display, &difficulty, &stopwatch);
+            window.refresh();
+            game_state.current_direction = handle_input(&window, game_state.current_direction);
+            handle_stopwatch(&mut stopwatch, &game_state.current_direction);
+            handle_snake_movement(&mut snake, &mut fruit, &difficulty, &mut game_state);
 
             thread::sleep(Duration::from_millis(difficulty.get_refresh_delay()));
         }
 
-        score_manager.write_score(current_score, &difficulty, user_name, stopwatch.elapsed().as_millis());
+        score_manager.write_score(game_state.current_score, &difficulty, user_name, stopwatch.elapsed().as_millis());
         let new_high_scores = score_manager.get_high_scores(&difficulty, 3);
-        print_game_over_screen(current_score, &new_high_scores, &difficulty, &stopwatch);
-        LISTENING_FOR_GAME_TERMINATION.store(true, Ordering::Relaxed);
-        loop {
-            if GAME_RETRY.load(Ordering::Relaxed) {
-                high_score_display = create_high_score_display(&new_high_scores);
-                current_score = 0;
-                fruit.respawn();
-                snake.reset();
-                DIRECTION.store(Direction::STOP as usize, Ordering::Relaxed);
-                game_over = false;
-                stopwatch.reset();
-                LISTENING_FOR_GAME_TERMINATION.store(false, Ordering::Relaxed);
-                GAME_RETRY.store(false, Ordering::Relaxed);
-                break;
-            } else if GAME_TERMINATED.load(Ordering::Relaxed) {
-                break;
-            }
+        print_game_over_screen(game_state.current_score, &new_high_scores, &difficulty, &stopwatch, &window);
 
-            thread::sleep(Duration::from_millis(50));
+        window.nodelay(false);
+        loop {
+            match window.getch() {
+                Some(Input::Character(RETRY_KEY)) => {
+                    high_score_display = create_high_score_display(&new_high_scores);
+                    game_state.current_score = 0;
+                    game_state.game_over = false;
+                    game_state.current_direction = Direction::STOP;
+                    fruit.respawn();
+                    snake.reset();
+                    stopwatch.reset();
+                    break;
+                }
+                Some(Input::Character(QUIT_KEY)) => {
+                    game_state.game_terminated = true;
+                    break;
+                }
+                _ => {}
+            }
         }
+        window.nodelay(true);
     }
 }
 
-fn draw(snake: &Snake, fruit: &Fruit, score: u64, high_score_display: &String, difficulty: &Difficulty, stopwatch: &Stopwatch) {
+fn handle_input(window: &Window, curr_dir: Direction) -> Direction {
+    match window.getch() {
+        Some(Input::Character(UP_KEY)) => Direction::UP,
+        Some(Input::Character(DOWN_KEY)) => Direction::DOWN,
+        Some(Input::Character(LEFT_KEY)) => Direction::LEFT,
+        Some(Input::Character(RIGHT_KEY)) => Direction::RIGHT,
+        Some(Input::Character(PAUSE_KEY)) => Direction::STOP,
+        _ => curr_dir
+    }
+}
+
+fn handle_stopwatch(stopwatch: &mut Stopwatch, current_direction: &Direction) {
+    if *current_direction == STOP && stopwatch.is_running() {
+        stopwatch.stop();
+    } else if *current_direction != STOP && !stopwatch.is_running() {
+        stopwatch.start();
+    }
+}
+
+fn handle_snake_movement(snake: &mut Snake, fruit: &mut Fruit, difficulty: &Difficulty, game_state: &mut GameState) {
+    snake.move_pos(&game_state.current_direction);
+    // do not use an else if here since moving the snake when is_game_over_on_wall_collision is
+    // false might result in the snake being placed an a fruit, so this should always get checked
+    if snake.x_pos == 0 || snake.x_pos == FIELD_WIDTH - 1 || snake.y_pos == 0 || snake.y_pos == FIELD_HEIGHT - 1 {
+        if difficulty.is_game_over_on_wall_collision() {
+            game_state.game_over = true
+        } else {
+            if snake.x_pos == 0 {
+                snake.x_pos = FIELD_WIDTH - 2;
+            } else if snake.x_pos == FIELD_WIDTH - 1 {
+                snake.x_pos = 1;
+            }
+            if snake.y_pos == 0 {
+                snake.y_pos = FIELD_HEIGHT - 2;
+            } else if snake.y_pos == FIELD_HEIGHT - 1 {
+                snake.y_pos = 1;
+            }
+        }
+    }
+
+    for i in 0..snake.tail_x_pos.len() {
+        if snake.tail_x_pos[i] == snake.x_pos && snake.tail_y_pos[i] == snake.y_pos {
+            game_state.game_over = true
+        }
+    }
+
+    if snake.x_pos == fruit.x_pos && snake.y_pos == fruit.y_pos {
+        game_state.current_score += 5 * difficulty.get_score_multiplier() as u64;
+        snake.append_tail();
+        fruit.respawn();
+    }
+}
+
+fn draw(window: &Window, snake: &Snake, fruit: &Fruit, game_state: &GameState, high_score_display: &String, difficulty: &Difficulty, stopwatch: &Stopwatch) {
     let max_y_index = FIELD_HEIGHT - 1;
     let max_x_index = FIELD_WIDTH - 1;
     let tail_matrix = snake.create_tail_matrix();
@@ -184,100 +194,70 @@ fn draw(snake: &Snake, fruit: &Fruit, score: u64, high_score_display: &String, d
     for y in 0..FIELD_HEIGHT {
         for x in 0..FIELD_WIDTH {
             if y == 0 || x == 0 || y == max_y_index || x == max_x_index {
-                addch(WALL_SYMBOL as u32);
+                window.addch(WALL_SYMBOL);
             } else if y == snake.y_pos && x == snake.x_pos {
-                addch(HEAD_SYMBOL as u32);
+                window.addch(HEAD_SYMBOL);
             } else if y == fruit.y_pos && x == fruit.x_pos {
-                addch(FRUIT_SYMBOL as u32);
+                window.addch(FRUIT_SYMBOL);
             } else if tail_matrix[y as usize][x as usize] {
-                addch(TAIL_SYMBOL as u32);
+                window.addch(TAIL_SYMBOL);
             } else {
-                addch(' ' as u32);
+                window.addch(' ');
             }
         }
 
-        addch('\n' as u32);
+        window.addch('\n');
     }
-    addch('\n' as u32);
-    addstr(format!("Score:                                  {}", score).as_str());
-    addch('\n' as u32);
-    addstr(format!("High score (for current difficulty):    {}", high_score_display).as_str());
-    addch('\n' as u32);
-    addstr(format!("Tail length:                            {}", snake.tail_x_pos.len()).as_str());
-    addch('\n' as u32);
-    addstr(format!("Head pos:                               x: {}\n                                        y: {}", snake.x_pos, snake.y_pos).as_str());
-    addch('\n' as u32);
-    let direction: Direction = DIRECTION.load(Ordering::Relaxed).into();
-    addstr(format!("Direction:                              {}", direction).as_str());
-    addch('\n' as u32);
-    addstr(format!("Difficulty:                             {}", difficulty).as_str());
-    addch('\n' as u32);
-    addstr(format!("Duration:                               {}", stopwatch.elapsed().format_duration()).as_str());
+    window.addch('\n');
+    window.addstr(format!("Score:                                  {}", game_state.current_score).as_str());
+    window.addch('\n');
+    window.addstr(format!("High score (for current difficulty):    {}", high_score_display).as_str());
+    window.addch('\n');
+    window.addstr(format!("Tail length:                            {}", snake.tail_x_pos.len()).as_str());
+    window.addch('\n');
+    window.addstr(format!("Head pos:                               x: {}\n                                        y: {}", snake.x_pos, snake.y_pos).as_str());
+    window.addch('\n');
+    window.addstr(format!("Direction:                              {}", game_state.current_direction).as_str());
+    window.addch('\n');
+    window.addstr(format!("Difficulty:                             {}", difficulty).as_str());
+    window.addch('\n');
+    window.addstr(format!("Duration:                               {}", stopwatch.elapsed().format_duration()).as_str());
 }
 
-fn select_difficulty() -> Difficulty {
-    let difficulty;
+fn select_difficulty(window: &Window) -> Difficulty {
     loop {
-        print_difficulty_selection();
-        let selected: Result<u8, _> = getch().try_into();
-
-        match selected {
-            Ok(selected_u8) => {
-                let selected_char = selected_u8 as char;
-                let digit_conversion = selected_char.to_digit(10);
-                match digit_conversion {
-                    Some(digit) => {
-                        let difficulty_conversion: Result<Difficulty, _> = digit.try_into();
-                        match difficulty_conversion {
-                            Ok(selected_difficulty) => {
-                                difficulty = selected_difficulty;
-                                break;
-                            }
-                            Err(_) => {
-                                clear();
-                                addstr(format!("Could not get difficulty for {}", digit).as_str());
-                                addch('\n' as u32);
-                                refresh();
-                                continue;
-                            }
-                        }
-                    }
-                    None => {
-                        clear();
-                        addstr("Could not convert char to digit");
-                        addch('\n' as u32);
-                        refresh();
-                        continue;
+        print_difficulty_selection(window);
+        match window.getch() {
+            Some(Input::Character(input_char)) => {
+                let digit_conversion = input_char.to_digit(10);
+                if let Some(digit) = digit_conversion {
+                    let difficulty_conversion: Result<Difficulty, _> = digit.try_into();
+                    if let Ok(difficulty) = difficulty_conversion {
+                        return difficulty;
                     }
                 }
+
+                window.clear();
+                window.addstr(format!("Could net get difficulty for {}", input_char));
+                window.addch('\n');
+                window.refresh();
             }
-            Err(_) => {
-                clear();
-                addstr("Could not convert input to ascii");
-                addch('\n' as u32);
-                refresh();
-                continue;
-            }
+            _ => {}
         }
     }
-    addch('\n' as u32);
-    addstr(format!("Selected difficulty {}", difficulty).as_str());
-    refresh();
-
-    return difficulty;
 }
 
-fn print_difficulty_selection() {
-    addstr("Select difficulty:");
-    addch('\n' as u32);
-    addstr(format!("{} - {}: {}", Difficulty::EASY as u8, Difficulty::EASY, Difficulty::EASY.get_description()).as_str());
-    addch('\n' as u32);
-    addstr(format!("{} - {}: {}", Difficulty::ARCADE as u8, Difficulty::ARCADE, Difficulty::ARCADE.get_description()).as_str());
-    addch('\n' as u32);
-    addstr(format!("{} - {}: {}", Difficulty::NORMAL as u8, Difficulty::NORMAL, Difficulty::NORMAL.get_description()).as_str());
-    addch('\n' as u32);
-    addstr(format!("{} - {}: {}", Difficulty::HARD as u8, Difficulty::HARD, Difficulty::HARD.get_description()).as_str());
-    refresh();
+fn print_difficulty_selection(window: &Window) {
+    window.addstr("Select difficulty:");
+    window.addch('\n');
+    window.addstr(format!("{} - {}: {}", Difficulty::EASY as u8, Difficulty::EASY, Difficulty::EASY.get_description()).as_str());
+    window.addch('\n');
+    window.addstr(format!("{} - {}: {}", Difficulty::ARCADE as u8, Difficulty::ARCADE, Difficulty::ARCADE.get_description()).as_str());
+    window.addch('\n');
+    window.addstr(format!("{} - {}: {}", Difficulty::NORMAL as u8, Difficulty::NORMAL, Difficulty::NORMAL.get_description()).as_str());
+    window.addch('\n');
+    window.addstr(format!("{} - {}: {}", Difficulty::HARD as u8, Difficulty::HARD, Difficulty::HARD.get_description()).as_str());
+    window.refresh();
 }
 
 fn create_high_score_display(high_score_vec: &Vec<(u64, String, Option<u64>)>) -> String {
@@ -314,9 +294,9 @@ Enter player name:
     "#, playtime_display);
 }
 
-fn print_game_over_screen(current_score: u64, high_scores: &Vec<(u64, String, Option<u64>)>, difficulty: &Difficulty, stopwatch: &Stopwatch) {
-    clear();
-    refresh();
+fn print_game_over_screen(current_score: u64, high_scores: &Vec<(u64, String, Option<u64>)>, difficulty: &Difficulty, stopwatch: &Stopwatch, window: &Window) {
+    window.clear();
+    window.refresh();
     let game_over_text = r#"
  _____   ___  ___  ___ _____   _____  _   _ ___________
 |  __ \ / _ \ |  \/  ||  ___| |  _  || | | |  ___| ___ \
@@ -340,6 +320,6 @@ fn print_game_over_screen(current_score: u64, high_scores: &Vec<(u64, String, Op
     }
 
     output.push_str("\n\nPress r to retry or q to quit.");
-    addstr(output.as_str());
-    refresh();
+    window.addstr(output.as_str());
+    window.refresh();
 }
